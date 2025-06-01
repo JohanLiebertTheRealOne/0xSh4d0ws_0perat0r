@@ -32,6 +32,6 @@ We welcome contributions from the community! Check out CONTRIBUTING.md to get st
 📜 License
 
 Licensed under the MIT License. Use it, modify it, improve it — just give credit.
-👤 Author
+👤 Lysandre
 
-Created by YourName or Handle — feel free to reach out or open an issue.
+Created by Lysandre, feel free to reach out or open an issue.
