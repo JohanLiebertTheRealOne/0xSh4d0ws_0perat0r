@@ -9,6 +9,18 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.fernet import Fernet
+import logging
+import importlib.util
+import sys
+
+# -----------------------------------------------------------------------------
+# Configuration du logger pour surveillance en temps réel
+# -----------------------------------------------------------------------------
+logging.basicConfig(
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # -----------------------------------------------------------------------------
 # Constantes
@@ -20,6 +32,7 @@ kdf_r = 8                 # Paramètre r de Scrypt
 kdf_p = 1                 # Paramètre p de Scrypt
 inactivity_timeout = 300   # secondes avant verrouillage automatique (5 minutes)
 max_attempts = 5           # Tentatives max de mot de passe
+plugins_folder = 'plugins'  # Répertoire pour modules externes
 
 # -----------------------------------------------------------------------------
 # Fonctions de chiffrement / déchiffrement avec Scrypt
@@ -46,6 +59,7 @@ def initialize_data(password: bytes) -> (list, bytes):
 
     with open(data_file, 'wb') as f:
         f.write(salt + token)
+    logging.info('Initialisation de data.enc avec nouveau sel.')
     return empty_data, salt
 
 
@@ -61,7 +75,9 @@ def load_data(password: bytes) -> (list, bytes):
     try:
         decrypted = fernet.decrypt(token)
         data = json.loads(decrypted.decode())
+        logging.info('Chargement des données réussi.')
     except Exception:
+        logging.warning('Échec du déchiffrement: mot de passe incorrect ou fichier corrompu.')
         raise ValueError("Mot de passe incorrect ou fichier corrompu.")
 
     return data, salt
@@ -74,6 +90,7 @@ def save_data(data: list, password: bytes, salt: bytes) -> None:
     token = fernet.encrypt(json.dumps(data).encode())
     with open(data_file, 'wb') as f:
         f.write(salt + token)
+    logging.info('Données sauvegardées.')
 
 # -----------------------------------------------------------------------------
 # Générateurs de secrets
@@ -114,6 +131,30 @@ def generate_passphrase() -> str:
     return f"The {adj1} {noun1} {verb} {prep} the {adj2} {adj3} {noun2}"
 
 # -----------------------------------------------------------------------------
+# Gestion des plugins
+# -----------------------------------------------------------------------------
+def load_plugins():
+    """Charge dynamiquement les plugins Python depuis le dossier 'plugins'."""
+    plugins = {}
+    if not os.path.isdir(plugins_folder):
+        os.makedirs(plugins_folder)
+        return plugins
+
+    for fname in os.listdir(plugins_folder):
+        if fname.endswith('.py'):
+            path = os.path.join(plugins_folder, fname)
+            spec = importlib.util.spec_from_file_location(fname[:-3], path)
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+                if hasattr(module, 'Plugin'):
+                    plugins[fname[:-3]] = module.Plugin()
+                    logging.info(f"Plugin chargé: {fname}")
+            except Exception as e:
+                logging.error(f"Échec du chargement du plugin {fname}: {e}")
+    return plugins
+
+# -----------------------------------------------------------------------------
 # Classe principale de l'application
 # -----------------------------------------------------------------------------
 class SecureDataStoreApp:
@@ -124,19 +165,19 @@ class SecureDataStoreApp:
         self.master_password = None
         self.attempts = 0
         self.inactivity_timer = None
+        self.plugins = load_plugins()
 
-        # Initialisation ou configuration
+        # Si le fichier n'existe pas : initialisation avant mainloop
         if not os.path.exists(data_file):
             self.first_time_setup()
         else:
             self.setup_authentication()
 
     def first_time_setup(self):
-        """Processus d'initialisation avant affichage de la GUI."""
-        # On utilise la fenêtre racine pour afficher les dialogues
+        """Processus d'initialisation (avant affichage de la GUI)."""
         self.root.withdraw()
         use_passphrase = messagebox.askyesno(
-            "Initialisation - Clé maître", 
+            "Initialisation - Clé maître",
             "Voulez-vous générer une phrase de passe unique comme clé maîtresse ?"
         )
         if use_passphrase:
@@ -151,7 +192,7 @@ class SecureDataStoreApp:
         else:
             pwd = simpledialog.askstring(
                 "Initialisation - Clé maître",
-                "Choisissez un mot de passe maître (min 12 caractères):", 
+                "Choisissez un mot de passe maître (min 12 caractères):",
                 show="*"
             )
             if not pwd or len(pwd) < 12:
@@ -208,12 +249,28 @@ class SecureDataStoreApp:
         """Construction et affichage de la fenêtre principale."""
         self.root.deiconify()
         self.root.title("Gestionnaire d'identités sécurisé")
-        self.root.geometry("600x450")
+        self.root.geometry("700x500")
         self.root.resizable(False, False)
+
+        # Menu principal
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        # Menu Plugins
+        plugin_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Plugins", menu=plugin_menu)
+        if self.plugins:
+            for name, plugin in self.plugins.items():
+                plugin_menu.add_command(
+                    label=name,
+                    command=lambda p=plugin: self.run_plugin(p)
+                )
+        else:
+            plugin_menu.add_command(label="Aucun plugin trouvé", state=tk.DISABLED)
 
         main_frame = ttk.Frame(self.root, padding=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Barre de recherche
         search_frame = ttk.Frame(main_frame)
         search_frame.pack(fill=tk.X)
         self.search_var = tk.StringVar()
@@ -221,6 +278,7 @@ class SecureDataStoreApp:
         ttk.Button(search_frame, text="Rechercher", command=self.search_entries).pack(side=tk.LEFT)
         ttk.Button(search_frame, text="Réinitialiser", command=self.refresh_entries_list).pack(side=tk.LEFT, padx=(5, 0))
 
+        # Listbox des entrées
         self.entries_listbox = tk.Listbox(main_frame, height=15)
         self.entries_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=(10, 0))
         self.entries_listbox.bind('<Double-Button-1>', lambda e: self.view_entry())
@@ -229,9 +287,9 @@ class SecureDataStoreApp:
         scrollbar.pack(side=tk.LEFT, fill=tk.Y, pady=(10, 0))
         self.entries_listbox.config(yscrollcommand=scrollbar.set)
 
+        # Boutons d’action
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0), pady=(10, 0))
-
         ttk.Button(button_frame, text="Ajouter", width=15, command=self.add_entry).pack(pady=(0, 10))
         ttk.Button(button_frame, text="Voir", width=15, command=self.view_entry).pack(pady=(0, 10))
         ttk.Button(button_frame, text="Supprimer", width=15, command=self.delete_entry).pack(pady=(0, 10))
@@ -288,6 +346,7 @@ class SecureDataStoreApp:
             self.data.append(new_entry)
             save_data(self.data, self.master_password, self.salt)
             self.refresh_entries_list()
+            logging.info(f"Nouvelle entrée ajoutée : {new_entry['label']}")
             entry_window.destroy()
 
         ttk.Button(entry_window, text="Enregistrer", command=save_new_entry).grid(row=len(fields), column=0, columnspan=2, pady=15)
@@ -329,9 +388,11 @@ class SecureDataStoreApp:
         entry = self.data[idx]
         answer = messagebox.askyesno("Confirmation", f"Supprimer '{entry.get('label', '')}' ?")
         if answer:
+            removed_label = entry.get('label', '')
             self.data.pop(idx)
             save_data(self.data, self.master_password, self.salt)
             self.refresh_entries_list()
+            logging.info(f"Entrée supprimée : {removed_label}")
 
     def show_password_generator(self):
         """Affiche un mot de passe fort généré et copie dans le presse-papiers."""
@@ -342,18 +403,47 @@ class SecureDataStoreApp:
         self.root.clipboard_clear()
         self.root.clipboard_append(pwd)
         messagebox.showinfo("Mot de passe généré", f"{pwd}\n(Le mot de passe a été copié dans le presse-papiers.)")
+        logging.info("Mot de passe fort généré et copié.")
+
+    def run_plugin(self, plugin):
+        """Exécute un plugin chargé avec son interface."""
+        try:
+            plugin.run(self)  # On passe l'instance pour interaction éventuelle
+            logging.info(f"Plugin exécuté : {plugin}")
+        except Exception as e:
+            logging.error(f"Erreur lors de l'exécution du plugin: {e}")
+            messagebox.showerror("Plugin erreur", f"Une erreur est survenue: {e}")
 
     def quit_app(self):
         """Enregistre les données et quitte proprement."""
         if self.inactivity_timer:
             self.inactivity_timer.cancel()
         save_data(self.data, self.master_password, self.salt)
+        logging.info("Application fermée.")
         self.root.destroy()
 
+
 # -----------------------------------------------------------------------------
-# Point d'entrée
+# Exécution principale
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
+    # Si des arguments en CLI sont passés, on peut ajouter une interface CLI basique
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1]
+        if cmd == 'list':
+            if not os.path.exists(data_file):
+                print("Aucun fichier de données trouvé.")
+                sys.exit(0)
+            pwd = input("Mot de passe maître: ")
+            try:
+                data, _ = load_data(pwd.encode())
+                for entry in data:
+                    print(f"- {entry.get('label')} : {entry.get('email')}")
+            except Exception as e:
+                print(f"Erreur: {e}")
+            sys.exit(0)
+        # D'autres commandes CLI peuvent être ajoutées ici
+
     root = tk.Tk()
     app = SecureDataStoreApp(root)
     root.mainloop()
